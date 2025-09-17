@@ -21,6 +21,7 @@
 #    include "common.hpp"
 #endif
 #include "transpose_kernel.hpp"
+#include "softmax_kernel.hpp"
 
 typedef std::chrono::high_resolution_clock Time;
 typedef std::chrono::nanoseconds ns;
@@ -58,7 +59,6 @@ float dot_product(const D* a, const D* b, int len, int stride_b = 1) {
 }
 
 }  // namespace ref
-
 
 template <typename TDST, typename TSRC>
 inline void transpose_tailx16_kernel(TDST* dst,
@@ -279,17 +279,29 @@ PlainTensor xattn_estimate(PlainTensor& query,
 
     parallel_for3d(q_num_strided, H, L, [&](size_t b, size_t h, size_t l) {
         auto* data = attn_sum_temp.ptr<float>(b, h, l, 0);
-
-        for (size_t s = 0; s < k_num_strided; s++) {
-            if (causal && b < s) {
-                data[s] = -std::numeric_limits<float>::infinity();
-            } else {
-                data[s] = data[s] / sqrt(S) / stride / norm;
-            }
-        }
-
-        ref::softmax(data, k_num_strided);
+        auto ncausal = b + 1;
+        attn_softmax_kernel<float>(data,
+                                   reinterpret_cast<float*>(data),
+                                   1.0/sqrt(S) / stride / norm,
+                                   nullptr,
+                                   nullptr,
+                                   nullptr,
+                                   false,
+                                   ncausal,
+                                   k_num_strided,
+                                   ov::element::f32,
+                                   ov::element::f32,
+                                   0);
     });
+
+        for (size_t i = 0; i < attn_sum_temp.m_dims[0]; i++) {
+            for (size_t j = 0; j < attn_sum_temp.m_dims[3]; j++) { 
+                std::cout << *attn_sum_temp.ptr<float>(i, 0, 0, j) << " ";
+            }
+            std::cout << std::endl;
+        }
+        std::cout << std::endl;
+    
 
     PlainTensor attn_sum;
     attn_sum.resize({q_num_blocks, H, L, k_num_blocks}, attn_sum_temp.m_element_size, attn_sum_temp.m_dt);
