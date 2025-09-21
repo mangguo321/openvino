@@ -20,8 +20,8 @@
 
 #    include "common.hpp"
 #endif
-#include "transpose_kernel.hpp"
 #include "softmax_kernel.hpp"
+#include "transpose_kernel.hpp"
 
 typedef std::chrono::high_resolution_clock Time;
 typedef std::chrono::nanoseconds ns;
@@ -134,6 +134,73 @@ static void transpose_16NxK(T* dst,
     transpose_16NxK<uint32_t, ov::element::u32>(d, s, N, K >> 1, block_size, dst_stride, src_stride >> 1);
 }
 #endif
+
+static inline float hsum256_ps(__m256 v)
+{
+    __m256 t1 = _mm256_hadd_ps(v, v);
+    __m256 t2 = _mm256_hadd_ps(t1, t1);
+    __m128 lo = _mm256_castps256_ps128(t2);
+    __m128 hi = _mm256_extractf128_ps(t2, 1);
+    __m128 sum = _mm_add_ps(lo, hi);
+    return _mm_cvtss_f32(sum);
+}
+
+void sum_blocks8x8(const float *a, size_t M, size_t a_stride, float *out, size_t out_stride)
+{
+    size_t block_num = (M + 7) / 8;
+    size_t col_num = block_num * 8;
+    std::cout << "block_num " << block_num << " col_num " << col_num << std::endl;
+ 
+    #if defined(HAVE_AVX512F) || defined(HAVE_AVX2)
+    size_t i = 0;
+    for (; i + 8 <= M; i += 8)
+    {
+        for (size_t j = 0; j + 8 <= col_num; j += 8)
+        {
+            __m256 r0 = _mm256_loadu_ps(a + (i + 0) * a_stride + j);
+            __m256 r1 = _mm256_loadu_ps(a + (i + 1) * a_stride + j);
+            __m256 r2 = _mm256_loadu_ps(a + (i + 2) * a_stride + j);
+            __m256 r3 = _mm256_loadu_ps(a + (i + 3) * a_stride + j);
+            __m256 r4 = _mm256_loadu_ps(a + (i + 4) * a_stride + j);
+            __m256 r5 = _mm256_loadu_ps(a + (i + 5) * a_stride + j);
+            __m256 r6 = _mm256_loadu_ps(a + (i + 6) * a_stride + j);
+            __m256 r7 = _mm256_loadu_ps(a + (i + 7) * a_stride + j);
+
+            __m256 sum = _mm256_add_ps(r0, r1);
+            sum = _mm256_add_ps(sum, r2);
+            sum = _mm256_add_ps(sum, r3);
+            sum = _mm256_add_ps(sum, r4);
+            sum = _mm256_add_ps(sum, r5);
+            sum = _mm256_add_ps(sum, r6);
+            sum = _mm256_add_ps(sum, r7);
+
+            const int ib = i >> 3;
+            const int jb = j >> 3;
+            const float block_sum = hsum256_ps(sum);
+            out[ib * out_stride + jb] = block_sum;
+        }
+    }
+
+    auto tails = M - i;
+    if (tails)
+    {
+        for (size_t j = 0; j + 8 <= col_num; j += 8)
+        {
+            __m256 sum = _mm256_setzero_ps();
+            for (size_t row = i; row < M; row++)
+            {
+                __m256 r = _mm256_loadu_ps(a + row * a_stride + j);
+                sum = _mm256_add_ps(sum, r);
+            }
+            const float block_sum = hsum256_ps(sum);
+            const int jb = j >> 3;
+            out[(block_num - 1) * out_stride + jb] = block_sum;
+            
+        }
+    }
+    #endif
+}
+
 
 PlainTensor xattn_estimate(PlainTensor& query,
                            PlainTensor& key,
@@ -282,7 +349,7 @@ PlainTensor xattn_estimate(PlainTensor& query,
         auto ncausal = b + 1;
         attn_softmax_kernel<float>(data,
                                    reinterpret_cast<float*>(data),
-                                   1.0/sqrt(S) / stride / norm,
+                                   1.0 / sqrt(S) / stride / norm,
                                    nullptr,
                                    nullptr,
                                    nullptr,
@@ -294,21 +361,12 @@ PlainTensor xattn_estimate(PlainTensor& query,
                                    0);
     });
 
-        for (size_t i = 0; i < attn_sum_temp.m_dims[0]; i++) {
-            for (size_t j = 0; j < attn_sum_temp.m_dims[3]; j++) { 
-                std::cout << *attn_sum_temp.ptr<float>(i, 0, 0, j) << " ";
-            }
-            std::cout << std::endl;
-        }
-        std::cout << std::endl;
-    
-
-    PlainTensor attn_sum;
-    attn_sum.resize({q_num_blocks, H, L, k_num_blocks}, attn_sum_temp.m_element_size, attn_sum_temp.m_dt);
+    PlainTensor attn_sum1;
+    attn_sum1.resize({q_num_blocks, H, L, k_num_blocks}, attn_sum_temp.m_element_size, attn_sum_temp.m_dt);
     parallel_for2d(H, L, [&](size_t h, size_t l) {
         for (size_t row = 0; row < q_num_blocks; row++) {
             for (size_t col = 0; col < k_num_blocks; col++) {
-                auto* out = attn_sum.ptr<float>(row, h, l, col);
+                auto* out = attn_sum1.ptr<float>(row, h, l, col);
 
                 float value = 0.0f;
                 for (size_t i = 0; i < num_per_block; i++) {
@@ -326,6 +384,35 @@ PlainTensor xattn_estimate(PlainTensor& query,
             }
         }
     });
+
+
+    PlainTensor attn_sum;
+    attn_sum.resize({q_num_blocks, H, L, k_num_blocks}, attn_sum_temp.m_element_size, attn_sum_temp.m_dt);
+    size_t src_stride = attn_sum_temp.size(1) * attn_sum_temp.size(2) * attn_sum_temp.size(3);
+    size_t dst_stride = attn_sum.size(1) * attn_sum.size(2) * attn_sum.size(3);
+    parallel_for2d(H, L, [&](size_t h, size_t l) {
+        auto* src = attn_sum_temp.ptr<float>(0, h, l, 0);
+        auto* dst = attn_sum.ptr<float>(0, h, l, 0);
+        sum_blocks8x8(src, attn_sum_temp.size(0), src_stride, dst, dst_stride);
+    });
+
+    // std::cout << "after sum===" << std::endl;
+    // for (size_t i = 0; i < attn_sum.m_dims[0]; i++) {
+    //     for (size_t j = 0; j < attn_sum.m_dims[3]; j++) {
+    //         std::cout << *attn_sum.ptr<float>(i, 0, 0, j) << " ";
+    //     }
+    //     std::cout << std::endl;
+    // }
+    // std::cout << std::endl;
+// 
+    // std::cout << "after sum ref===" << std::endl;
+    // for (size_t i = 0; i < attn_sum1.m_dims[0]; i++) {
+    //     for (size_t j = 0; j < attn_sum1.m_dims[3]; j++) {
+    //         std::cout << *attn_sum1.ptr<float>(i, 0, 0, j) << " ";
+    //     }
+    //     std::cout << std::endl;
+    // }
+    // std::cout << std::endl;
 
     // Find blocks
     PlainTensor mask;
@@ -374,6 +461,37 @@ PlainTensor xattn_estimate(PlainTensor& query,
             *(mask.ptr<bool>(h, b, values_with_index[i].second)) = value;
         }
     });
+
+    if (1) {
+        std::cout << "mask shape " << mask.size(0) << " " << mask.size(1) << " " << mask.size(2) << " " << std::endl;
+        static int layer_idx = 0;
+        std::string maskfilename = "masklayer" + std::to_string(layer_idx) + "_" + std::to_string(threshold) + ".bin";
+        std::ofstream outFile2(maskfilename, std::ios::binary);
+        for (size_t hn = 0; hn < 1; hn++) {
+            size_t zero_sum = 0;
+            std::cout << "=========head" << hn << std::endl;
+            for (size_t i = 0; i < mask.size(1); i++) {
+                std::cout << "head" << hn << " " << i << " ";
+                for (size_t j = 0; j < mask.size(2); j++) {
+                    bool v = *mask.ptr<bool>(hn, i, j);
+                    char byte = v ? 1 : 0;
+                    outFile2.write(&byte, sizeof(char));
+                    if (!v) {
+                        zero_sum++;
+                    }
+                    std::cout << *mask.ptr<bool>(hn, i, j);
+                }
+                std::cout << std::endl;
+            }
+            // std::cout << "zero_sum " << zero_sum << std::endl;
+            // zero_sum = zero_sum - (mask.size(1)) * (mask.size(2) - 1) / 2;
+            // std::cout << "block_size " << block_size << " stride " << stride << std::endl;
+            // std::cout << "head" << hn << " zero_sum " << zero_sum << " Sparsity Ratio "
+            //           << static_cast<double>(zero_sum) / (mask.size(1) * (mask.size(2) + 1) / 2) << std::endl;
+        }
+        outFile2.close();
+        layer_idx++;
+    }
 
     return mask;
 }

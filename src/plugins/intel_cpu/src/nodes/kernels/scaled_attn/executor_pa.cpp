@@ -2216,6 +2216,7 @@ struct AttentionExecutor : public PagedAttentionExecutor {
                                        stride,
                                        block_size,
                                        threshold);
+        exit(0);
 
         if (rotated_block_indices) {
             // Rotate kv cache currently doesn't support quantized cache.
