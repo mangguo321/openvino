@@ -592,6 +592,37 @@ PlainTensor xattn_estimate(PlainTensor& query,
         }
     });
 
+ if (1) {
+        std::cout << "mask shape " << mask.size(0) << " " << mask.size(1) << " " << mask.size(2) << " " << std::endl;
+        static int layer_idx = 0;
+        std::string maskfilename = "masklayer" + std::to_string(layer_idx) + "_" + std::to_string(threshold) + ".bin";
+        std::ofstream outFile2(maskfilename, std::ios::binary);
+        for (size_t hn = 0; hn < H; hn++) {
+            size_t zero_sum = 0;
+            std::cout << "=========head" << hn << std::endl;
+            for (size_t i = 0; i < mask.size(1); i++) {
+                std::cout << "head" << hn << " " << i << " ";
+                for (size_t j = 0; j < mask.size(2); j++) {
+                    bool v = *mask.ptr<bool>(hn, i, j);
+                    char byte = v ? 1 : 0;
+                    outFile2.write(&byte, sizeof(char));
+                    if (!v) {
+                        zero_sum++;
+                    }
+                    std::cout << *mask.ptr<bool>(hn, i, j);
+                }
+                std::cout << std::endl;
+            }
+            // std::cout << "zero_sum " << zero_sum << std::endl;
+            // zero_sum = zero_sum - (mask.size(1)) * (mask.size(2) - 1) / 2;
+            // std::cout << "block_size " << block_size << " stride " << stride << std::endl;
+            // std::cout << "head" << hn << " zero_sum " << zero_sum << " Sparsity Ratio "
+            //           << static_cast<double>(zero_sum) / (mask.size(1) * (mask.size(2) + 1) / 2) << std::endl;
+        }
+        outFile2.close();
+        layer_idx++;
+    }
+
     return mask;
 }
 #endif

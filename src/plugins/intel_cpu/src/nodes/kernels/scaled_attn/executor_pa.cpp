@@ -848,7 +848,7 @@ struct MHAHelper {
             };
         // Sparse attention mask pointer for current softmax kernel processing
         uint8_t* xattn_mask = nullptr;
-        if (!sparse_attention_mask.empty()) {
+        if (false && !sparse_attention_mask.empty()) {
             sparse_scale = (_sparse_mask_block_size == 0 || _sparse_mask_block_size == _block_size)
                                ? 1
                                : (_sparse_mask_block_size / _block_size);  // >=1
@@ -878,7 +878,8 @@ struct MHAHelper {
             // map runtime (block_size) indices to mask (xt_block_size) indices
             for (size_t k_blk = 0; k_blk < cur_kv_len_blocks; k_blk++) {
                 // sparse attention mask filtering
-                if (!sparse_attention_mask.empty()) {
+                // if (!sparse_attention_mask.empty()) {
+                    if (0) {
                     auto [q_m, k_m] = map_to_mask_idx(q_blk, k_blk);
                     if (!sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_m, k_m)[0]) {
                         // Skip GEMM for this block if mask is false
@@ -933,7 +934,7 @@ struct MHAHelper {
                     }
 
                     // Handle sparse attention mask for sliding window
-                    if (!sparse_attention_mask.empty()) {
+                    if (false && !sparse_attention_mask.empty()) {
                         // Get the original xattn_mask and calculate offset
                         auto* original_mask = reinterpret_cast<uint8_t*>(
                             sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk / sparse_scale));
@@ -965,10 +966,11 @@ struct MHAHelper {
                         alibi_slope = alibi_slopes.ptr<float>()[h];
                         alibi_lookup = _alibi_lookup.ptr<float>() + _alibi_lookup.m_dims[0] - ncausal;
                     }
-                    xattn_mask = sparse_attention_mask.empty()
-                                     ? nullptr
-                                     : reinterpret_cast<uint8_t*>(
-                                           sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk / sparse_scale));
+                    // xattn_mask = sparse_attention_mask.empty()
+                    //                  ? nullptr
+                    //                  : reinterpret_cast<uint8_t*>(
+                    //                        sparse_attention_mask[batch_in_seq].ptr<bool>(h, q_blk / sparse_scale));
+                    xattn_mask = nullptr;
                     attn_softmax_kernel<float>(score,
                                                reinterpret_cast<DATA_TYPE*>(score),
                                                revised_d_scale,
@@ -2343,7 +2345,7 @@ struct AttentionExecutor : public PagedAttentionExecutor {
                                                   xattention_stride,
                                                   xattention_block_size,
                                                   xattention_threshold);
-
+ 
         _kernel(q,
                 k_cache,
                 v_cache,
