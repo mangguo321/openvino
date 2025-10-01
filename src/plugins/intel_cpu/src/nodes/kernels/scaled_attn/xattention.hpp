@@ -9,10 +9,21 @@
 #include "openvino/core/shape.hpp"
 #include "utils/plain_tensor.hpp"
 
+struct KAttr {
+    int32_t k_len;
+    size_t block_size;
+
+    ov::intel_cpu::PlainTensor block_indices;
+    int32_t block_indice_begin;
+
+    // ov::intel_cpu::PlainTensor k;
+};
+
 namespace ov::Extensions::Cpu::XARCH {
 
 ov::intel_cpu::PlainTensor xattn_estimate(ov::intel_cpu::PlainTensor& query,
                                           ov::intel_cpu::PlainTensor& key,
+                                          KAttr& k_attr,
                                           size_t block_size,
                                           size_t stride,
                                           int norm,

@@ -2226,7 +2226,7 @@ struct AttentionExecutor : public PagedAttentionExecutor {
     }
 
     std::vector<PlainTensor> get_sparse_blocks(PlainTensor& q,
-                                               PlainTensor& k,
+                                               PlainTensor& k_cache,
                                                PlainTensor& past_lens,
                                                PlainTensor& subsequence_begins,
                                                PlainTensor& block_indices,
@@ -2239,10 +2239,15 @@ struct AttentionExecutor : public PagedAttentionExecutor {
 
         // TODO: support multiple batches
         for (size_t seq_idx = 0; seq_idx < 1; seq_idx++) {
+            auto q_len = subsequence_begins.ptr<int32_t>()[seq_idx + 1] - subsequence_begins.ptr<int32_t>()[seq_idx];
+            auto kv_len = past_lens.ptr<int32_t>()[seq_idx] + q_len;
+
             if (q.size(0) > 1) {
 #    if defined(OPENVINO_ARCH_X86_64)
+                KAttr k_attr{kv_len, _helper._block_size, block_indices, block_indices_begins.ptr<int32_t>()[seq_idx]};
                 masks[seq_idx] = xattn_estimate(q,
-                                                k,
+                                                k_cache,
+                                                k_attr,
                                                 x_attention_block_size,
                                                 x_attention_stride,
                                                 1,
@@ -2323,6 +2328,21 @@ struct AttentionExecutor : public PagedAttentionExecutor {
         }
 
         concat_pastkv(k, v, k_cache, v_cache, past_lens, subsequence_begins, block_indices, block_indices_begins);
+
+        xattention_threshold.resize<float>({1});
+        xattention_threshold.ptr<float>()[0] = 0.9f;
+        xattention_stride = 16;
+        xattention_block_size = 128;
+
+        sparse_attention_mask = get_sparse_blocks(q,
+                                                  k_cache,
+                                                  past_lens,
+                                                  subsequence_begins,
+                                                  block_indices,
+                                                  block_indices_begins,
+                                                  xattention_stride,
+                                                  xattention_block_size,
+                                                  xattention_threshold);
 
         _kernel(q,
                 k_cache,
